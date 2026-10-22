@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const SH = 3.75;          // Geschosshöhe (Annahme)
 const SLAB = 0.30;        // Deckenstärke
@@ -41,6 +42,7 @@ async function init() {
   META = await (await fetch('data/meta.json')).json();
   MPP = META.metersPerPx; W = META.width; H = META.height; CX = W * MPP / 2; CZ = H * MPP / 2;
   total = META.floors.length * 3 + 1;
+  floorMat.map.repeat.set(W * MPP / 2.2, H * MPP / 2.2);
   const ground = loadTex('data/ground.webp').then((t) => { tick(); return t; });
   await Promise.all(META.floors.map(async (f, i) => {
     const [data, texS, gridImg] = await Promise.all([
@@ -78,6 +80,26 @@ function planUV(geo) {
   }
   geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
 }
+let showPlan = false, showFurn = true;
+try { showPlan = localStorage.getItem('mmbbs3d.plan') === '1'; showFurn = localStorage.getItem('mmbbs3d.furn') !== '0'; } catch (e) {}
+function floorTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 512; const x = c.getContext('2d');
+  x.fillStyle = '#d9d2c5'; x.fillRect(0, 0, 512, 512);
+  // Eichenparkett-artige Dielen
+  const rnd = mulberry(7);
+  for (let row = 0; row < 8; row++) {
+    let off = (row % 2) * 128 + rnd() * 60;
+    for (let col = -1; col < 4; col++) {
+      const l = 72 + rnd() * 9; x.fillStyle = `hsl(33, ${24 + rnd() * 8}%, ${l}%)`;
+      x.fillRect(off + col * 200, row * 64, 198, 62);
+    }
+  }
+  for (let i = 0; i < 2500; i++) { x.fillStyle = `rgba(90,70,40,${rnd() * 0.05})`; x.fillRect(rnd() * 512, rnd() * 512, 20 + rnd() * 60, 1); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8; return t;
+}
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const floorMat = new THREE.MeshLambertMaterial({ map: floorTexture() });
 const wallMat = new THREE.MeshLambertMaterial({ color: 0xf1eee9 });
 const wallMatCut = new THREE.MeshLambertMaterial({ color: 0xe2ddd5 });
 const slabMat = new THREE.MeshLambertMaterial({ color: 0xf4f2ee, emissive: 0x2a2a2a });
@@ -97,7 +119,7 @@ function buildFloor(f) {
   f.texS.colorSpace = THREE.SRGBColorSpace; f.texS.anisotropy = maxAniso;
   f.planMat = new THREE.MeshBasicMaterial({ map: f.texS, transparent: false, alphaTest: 0.5 });
   f.planMat.color.setScalar(0.96);
-  g.add(new THREE.Mesh(top, f.planMat));
+  f.planMesh = new THREE.Mesh(top, showPlan ? f.planMat : floorMat); g.add(f.planMesh);
   // walls
   const ws = f.data.walls.map(shapeFrom);
   const wg = new THREE.ExtrudeGeometry(ws, { depth: SH - SLAB, bevelEnabled: false, curveSegments: 1 });
@@ -134,6 +156,7 @@ function buildFloor(f) {
   for (let i = 0; i < f.grid.length; i++) f.grid[i] = px[i * 4] > 150 ? 2 : px[i * 4] > 50 ? 1 : 0;
   f.gw = gc.width; f.gh = gc.height; f.cell = f.data.grid.cell;
   f.group = g; scene.add(g);
+  buildFurniture(f); buildPlants(f);
 }
 
 function makeLabel(r) {
@@ -181,6 +204,124 @@ function buildRoof() {
   const geo = new THREE.ExtrudeGeometry(top.data.footprint.map(shapeFrom), { depth: SLAB, bevelEnabled: false });
   geo.rotateX(-Math.PI / 2); geo.translate(0, (top.level + 1) * SH - SLAB, 0);
   roof = new THREE.Mesh(geo, roofMat); scene.add(roof);
+}
+
+// ---------- Innenausstattung ----------
+const M_WOOD = new THREE.MeshLambertMaterial({ color: 0xc9a77c });
+const M_METAL = new THREE.MeshLambertMaterial({ color: 0x3a3f44 });
+const M_CAB = new THREE.MeshLambertMaterial({ color: 0xf3f1ec });
+const M_CHAIR = new THREE.MeshLambertMaterial({ color: 0xffffff });
+const M_POT = new THREE.MeshLambertMaterial({ color: 0x4a4f55 });
+const M_LEAF = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
+const CHAIR_COLORS = [0x2fb6c9, 0xff6a3d, 0x3d4a57, 0x8bc34a, 0xf2b134].map((c) => new THREE.Color(c));
+const LEAF_COLORS = [0x3f7d3a, 0x4f9a43, 0x2f6b3a, 0x5c8f2f].map((c) => new THREE.Color(c));
+
+const GEO = (() => {
+  const box = (w, h, d, x, y, z) => { const g = new THREE.BoxGeometry(w, h, d); g.translate(x, y, z); return g; };
+  const chairShell = mergeGeometries([box(0.44, 0.05, 0.42, 0, 0.46, 0), box(0.44, 0.42, 0.04, 0, 0.7, 0.2)]);
+  const chairLegs = mergeGeometries([box(0.03, 0.45, 0.03, -0.19, 0.225, -0.17), box(0.03, 0.45, 0.03, 0.19, 0.225, -0.17),
+    box(0.03, 0.45, 0.03, -0.19, 0.225, 0.17), box(0.03, 0.45, 0.03, 0.19, 0.225, 0.17)]);
+  const top = box(1, 0.035, 1, 0, 0.735, 0);
+  const leg = box(0.04, 0.72, 0.04, 0, 0.36, 0);
+  const roundTop = new THREE.CylinderGeometry(0.5, 0.5, 0.035, 28); roundTop.translate(0, 0.735, 0);
+  const roundLeg = mergeGeometries([new THREE.CylinderGeometry(0.035, 0.035, 0.72, 10).translate(0, 0.36, 0), new THREE.CylinderGeometry(0.25, 0.25, 0.02, 20).translate(0, 0.01, 0)]);
+  const cab = box(1, 1, 1, 0, 0.5, 0);
+  const pot = new THREE.CylinderGeometry(0.2, 0.16, 0.42, 16); pot.translate(0, 0.21, 0);
+  const leaf = new THREE.IcosahedronGeometry(0.3, 1);
+  return { chairShell, chairLegs, top, leg, roundTop, roundLeg, cab, pot, leaf };
+})();
+
+function inst(geo, mat, n) { const m = new THREE.InstancedMesh(geo, mat, Math.max(1, n)); m.count = n; return m; }
+const _o = new THREE.Object3D();
+function put(mesh, i, x, y, z, ry, sx = 1, sy = 1, sz = 1) {
+  _o.position.set(x, y, z); _o.rotation.set(0, ry, 0); _o.scale.set(sx, sy, sz); _o.updateMatrix(); mesh.setMatrixAt(i, _o.matrix);
+}
+
+function buildFurniture(f) {
+  const list = f.data.furn || [];
+  const y0 = f.y0, grp = new THREE.Group();
+  const tables = list.filter((a) => a[0] === 'table'), chairs = list.filter((a) => a[0] === 'chair');
+  const rounds = list.filter((a) => a[0] === 'round'), cabs = list.filter((a) => a[0] === 'cab');
+  // Tische
+  const mTop = inst(GEO.top, M_WOOD, tables.length), mLeg = inst(GEO.leg, M_METAL, tables.length * 4);
+  tables.forEach(([, px, py, w, h, a], i) => {
+    const [x, z] = toWorld(px, py), ry = -a * Math.PI / 180;
+    put(mTop, i, x, y0, z, ry, w, 1, h);
+    const c = Math.cos(ry), s = Math.sin(ry), dx = w / 2 - 0.06, dz = h / 2 - 0.06;
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([sx, sz], k) => {
+      const lx = sx * dx, lz = sz * dz;
+      put(mLeg, i * 4 + k, x + lx * c + lz * s, y0, z - lx * s + lz * c, ry);
+    });
+  });
+  // runde Tische
+  const mRT = inst(GEO.roundTop, M_WOOD, rounds.length), mRL = inst(GEO.roundLeg, M_METAL, rounds.length);
+  rounds.forEach(([, px, py, w, h], i) => { const [x, z] = toWorld(px, py); const r = (w + h) / 2; put(mRT, i, x, y0, z, 0, r, 1, r); put(mRL, i, x, y0, z, 0); });
+  // Einbaumöbel / Schränke
+  const mCab = inst(GEO.cab, M_CAB, cabs.length);
+  cabs.forEach(([, px, py, w, h, a], i) => { const [x, z] = toWorld(px, py); put(mCab, i, x, y0, z, -a * Math.PI / 180, w - 0.02, 0.92, h - 0.02); });
+  // Stühle – zum nächsten Tisch gedreht
+  const tW = tables.map(([, px, py]) => toWorld(px, py)).concat(rounds.map(([, px, py]) => toWorld(px, py)));
+  const mShell = inst(GEO.chairShell, M_CHAIR, chairs.length), mCL = inst(GEO.chairLegs, M_METAL, chairs.length);
+  chairs.forEach(([, px, py, w, h, a], i) => {
+    const [x, z] = toWorld(px, py);
+    let best = null, bd = 1.3;
+    for (const [tx, tz] of tW) { const d = Math.hypot(tx - x, tz - z); if (d < bd) { bd = d; best = [tx, tz]; } }
+    let ry = -a * Math.PI / 180;
+    if (best) ry = Math.atan2(-(best[0] - x), -(best[1] - z));
+    put(mShell, i, x, y0, z, ry); put(mCL, i, x, y0, z, ry);
+    const ci = Math.abs(Math.floor(px / 300) * 7 + Math.floor(py / 300) * 13 + f.level * 3) % CHAIR_COLORS.length;
+    mShell.setColorAt(i, CHAIR_COLORS[ci]);
+  });
+  if (chairs.length) mShell.instanceColor.needsUpdate = true;
+  for (const m of [mTop, mLeg, mRT, mRL, mCab, mShell, mCL]) { m.instanceMatrix.needsUpdate = true; m.frustumCulled = false; grp.add(m); }
+  f.furnPts = list.map(([, px, py]) => toWorld(px, py));
+  f.furnGroup = grp; grp.visible = showFurn; f.group.add(grp);
+}
+
+function buildPlants(f) {
+  const skip = /WC|Technik|Treppen|Aufzug|PuMi|Lager|Abstell|Kühl|Frost|Putz|HAR|ELT|Schacht|Server|Dusch|Umkleide|Müll/i;
+  const spots = [];
+  const occupied = (x, z) => f.furnPts.some(([fx, fz]) => Math.hypot(fx - x, fz - z) < 0.8) || spots.some(([sx, sz]) => Math.hypot(sx - x, sz - z) < 2.5);
+  const nearWall = (x, z) => { for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; if (cellVal(f, x + Math.cos(a) * 0.45, z + Math.sin(a) * 0.45) === 2) return true; } return false; };
+  const clear = (x, z) => { for (let k = 0; k < 9; k++) { const a = k * Math.PI / 4, r = k === 8 ? 0 : 0.28; if (cellVal(f, x + Math.cos(a) * r, z + Math.sin(a) * r) !== 1) return false; } return true; };
+  for (const r of f.data.rooms) {
+    if (r.cluster || skip.test(r.name || '')) continue;
+    const want = /Flur|Aula|Cafeteria|Foyer|Halle|Lernlandschaft/i.test(r.name || '') ? 3 : 1;
+    const [cx, cz] = toWorld(r.x, r.y); let got = 0;
+    for (let rad = 0.5; rad < 9 && got < want; rad += 0.35) {
+      const n = Math.ceil(rad * 10);
+      for (let k = 0; k < n && got < want; k++) {
+        const a = k / n * Math.PI * 2 + rad, x = cx + Math.cos(a) * rad, z = cz + Math.sin(a) * rad;
+        if (clear(x, z) && nearWall(x, z) && !occupied(x, z) && lineFree(f, r.x, r.y, ...toPx(x, z))) { spots.push([x, z]); got++; }
+      }
+    }
+  }
+  const rnd = mulberry(100 + f.level);
+  const BLOBS = 5;
+  const mPot = inst(GEO.pot, M_POT, spots.length), mLeaf = inst(GEO.leaf, M_LEAF, spots.length * BLOBS);
+  spots.forEach(([x, z], i) => {
+    const tall = rnd() < 0.5, s = 0.8 + rnd() * 0.5;
+    put(mPot, i, x, f.y0, z, rnd() * 6, s, s, s);
+    for (let b = 0; b < BLOBS; b++) {
+      const h = (tall ? 0.7 + b * 0.28 : 0.55 + b * 0.12) * s, rr = (tall ? 0.18 : 0.25) * s;
+      const a = rnd() * Math.PI * 2, sc = (tall ? 0.9 - b * 0.08 : 1.1 - b * 0.1) * s;
+      put(mLeaf, i * BLOBS + b, x + Math.cos(a) * rr * (b ? 1 : 0.3), f.y0 + h, z + Math.sin(a) * rr * (b ? 1 : 0.3), rnd() * 6, sc, sc * (tall ? 1.3 : 0.9), sc);
+      mLeaf.setColorAt(i * BLOBS + b, LEAF_COLORS[Math.floor(rnd() * LEAF_COLORS.length)]);
+    }
+  });
+  if (spots.length) mLeaf.instanceColor.needsUpdate = true;
+  for (const m of [mPot, mLeaf]) { m.instanceMatrix.needsUpdate = true; m.frustumCulled = false; f.furnGroup.add(m); }
+}
+
+function setPlan(v) {
+  showPlan = v; try { localStorage.setItem('mmbbs3d.plan', v ? '1' : '0'); } catch (e) {}
+  for (const f of floors) f.planMesh.material = v ? f.planMat : floorMat;
+  $('tPlan').classList.toggle('on', v);
+}
+function setFurn(v) {
+  showFurn = v; try { localStorage.setItem('mmbbs3d.furn', v ? '1' : '0'); } catch (e) {}
+  for (const f of floors) f.furnGroup.visible = v;
+  $('tFurn').classList.toggle('on', v);
 }
 
 // ---------- floors / visibility ----------
@@ -261,6 +402,8 @@ addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   keys[e.code] = true;
   if (e.code === 'KeyM') setMode(mode === 'walk' ? 'orbit' : 'walk');
+  if (e.code === 'KeyP') setPlan(!showPlan);
+  if (e.code === 'KeyO') setFurn(!showFurn);
   if (e.code === 'KeyE' || e.code === 'PageUp') { setFloor(cur + 1); e.preventDefault(); }
   if (e.code === 'KeyQ' || e.code === 'PageDown') { setFloor(cur - 1); e.preventDefault(); }
 });
@@ -344,6 +487,8 @@ function buildUI() {
   });
   $('mWalk').onclick = () => setMode('walk');
   $('mOrbit').onclick = () => setMode('orbit');
+  $('tPlan').onclick = () => setPlan(!showPlan); $('tFurn').onclick = () => setFurn(!showFurn);
+  setPlan(showPlan); setFurn(showFurn);
   $('mInfo').onclick = () => { const i = $('info'); i.style.display = i.style.display === 'block' ? 'none' : 'block'; };
   $('goWalk').onclick = () => { $('start').style.display = 'none'; setMode('walk'); };
   $('goOrbit').onclick = () => { $('start').style.display = 'none'; setMode('orbit'); };

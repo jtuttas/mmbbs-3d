@@ -299,8 +299,36 @@ for fid, lvl, code, name in FLOORS:
         bb = b['bbox']
         if 'Treppenhaus' in txt and X0 < bb[0] < X1 and Y0 < bb[1] < Y1:
             stairs.append({'x': ((bb[0] + bb[2]) / 2 - X0) * R, 'y': ((bb[1] + bb[3]) / 2 - Y0) * R})
-    json.dump({'walls': polys, 'facade': facade_polys, 'footprint': fpolys, 'rooms': rooms, 'stairs': stairs,
+    # Möblierung aus den Plänen (weiße Flächen mit grauer Kontur)
+    furn = []
+    for d in drs:
+        if d['type'] != 'f' or key(d.get('fill')) != (1.0, 1.0, 1.0): continue
+        r = d['rect']
+        if r.x1 < X0 or r.x0 > X1 or r.y1 < Y0 or r.y0 > Y1 or inside_excl(r, ex): continue
+        if (0.75, 0.75, 0.75) not in sk.get((round(r.x0), round(r.y0), round(r.x1), round(r.y1)), ()): continue
+        pts = []
+        for it in d['items']:
+            for q in it[1:]:
+                if hasattr(q, 'x'): pts.append(P(q))
+                elif hasattr(q, 'x0'): pts += [P(q.tl), P(q.br)]
+                elif hasattr(q, 'ul'): pts += [P(q.ul), P(q.ur), P(q.lr), P(q.ll)]
+        if len(pts) < 3: continue
+        (cx, cy), (w, h), ang = cv2.minAreaRect(np.array(pts, np.float32))
+        wm_, hm_ = w * M / R, h * M / R
+        mn, mx = sorted([wm_, hm_])
+        curved = any(it[0] == 'c' for it in d['items'])
+        ix, iy = int(cx), int(cy)
+        if not (0 <= ix < W and 0 <= iy < H) or fp[iy, ix] == 0: continue
+        if curved:
+            if 0.6 <= mn and mx <= 1.5 and mx - mn < 0.15: t = 'round'
+            else: continue
+        elif 0.3 <= mn <= 0.5 and mx <= 0.56: t = 'chair'
+        elif mn >= 0.48 and mx <= 2.5 and mn * mx <= 4.5: t = 'table'
+        elif 0.35 <= mn <= 0.9 and mx > 2.5: t = 'cab'
+        else: continue
+        furn.append([t, round(cx, 1), round(cy, 1), round(wm_, 2), round(hm_, 2), round(float(ang), 1)])
+    json.dump({'walls': polys, 'furn': furn, 'facade': facade_polys, 'footprint': fpolys, 'rooms': rooms, 'stairs': stairs,
                'grid': {'w': gw, 'h': gh, 'cell': cell}}, open(f'{OUT}/{fid}.json', 'w'), separators=(',', ':'))
     meta['floors'].append({'id': fid, 'level': lvl, 'name': name, 'source': os.path.basename(path)})
-    print(fid, 'doors', ndoor, 'walls', len(polys), 'rooms', len(rooms), 'stairs', len(stairs), 'tex', pix.width, pix.height)
+    print(fid, 'furn', len(furn), 'doors', ndoor, 'walls', len(polys), 'rooms', len(rooms), 'stairs', len(stairs), 'tex', pix.width, pix.height)
 json.dump(meta, open(f'{OUT}/meta.json', 'w'), indent=1)

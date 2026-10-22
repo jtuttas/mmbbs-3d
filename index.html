@@ -29,6 +29,8 @@
   #floors button.on{background:var(--accent);border-color:var(--accent);color:#14100e}
   #modes{top:12px;right:12px;padding:6px;display:flex;gap:6px}
   #modes .btn.on{background:var(--accent2);border-color:var(--accent2);color:#06161a}
+  #modes .btn.tg.on{background:#e9eef1;border-color:#e9eef1;color:#14100e}
+  #modes{flex-wrap:wrap;justify-content:flex-end;max-width:calc(100vw - 24px)}
   #room{left:50%;transform:translateX(-50%);bottom:14px;padding:8px 14px;text-align:center;min-width:220px;display:none}
   #room b{font:600 14px "IBM Plex Mono",monospace;color:var(--accent)}
   #room div{font-size:13px}
@@ -83,14 +85,16 @@
 <div id="modes" class="panel">
   <button class="btn" id="mWalk">Begehen</button>
   <button class="btn" id="mOrbit">Übersicht</button>
+  <button class="btn tg" id="tPlan" title="Grundriss auf dem Boden ein-/ausblenden (P)">Plan</button>
+  <button class="btn tg" id="tFurn" title="Möblierung ein-/ausblenden (O)">Möbel</button>
   <button class="btn" id="mInfo" title="Info">i</button>
 </div>
 <div id="info" class="panel">
   <h3>Über dieses Modell</h3>
-  <p>Erzeugt automatisch aus den Vektor-Grundrissen „Zwischenstand nach vier Workshops“ (Remke Partner Innenarchitekten, Planstand 30.03.2023, M 1:100) für KG, EG und OG1–OG5. Wände, Stützen und Geschossflächen wurden aus den Planlinien extrahiert; der Plan selbst liegt als Bodenbelag in jedem Geschoss – Möblierung, Raumnummern und Flächen sind dort lesbar.</p>
+  <p>Erzeugt automatisch aus den Vektor-Grundrissen „Zwischenstand nach vier Workshops“ (Remke Partner Innenarchitekten, Planstand 30.03.2023, M 1:100) für KG, EG und OG1–OG5. Wände, Stützen und Geschossflächen wurden aus den Planlinien extrahiert; der Originalplan lässt sich über „Plan“ als Bodenbelag einblenden. Tische, Stühle, Schränke und Rundtische stammen aus der Möblierung der Pläne; Pflanzen sind frei ergänzt.</p>
   <p><b>Annahmen:</b> einheitliche Geschosshöhe 3,75 m, Wände raumhoch, Türen als Öffnungen ohne Sturz, Fenster nicht modelliert. Die Partizipations-Grundrisse sind ein Zwischenstand, keine Ausführungsplanung.</p>
   <p><b>Abkürzungen:</b> <code>AUR</code> Allgemeiner Unterrichtsraum · <code>NGF</code> Netto-Grundfläche · <code>RW</code> Rettungsweg · Raumnummer <code>3.B.007</code> = Geschoss 3, Cluster/Bereich B, Raum 007.</p>
-  <p><b>Steuerung:</b> <code>W A S D</code>/Pfeile laufen, Maus schauen (Klick ins Bild sperrt die Maus, <code>Esc</code> löst), <code>Shift</code> schneller, <code>Q</code>/<code>E</code> bzw. <code>Bild↓/↑</code> Geschoss wechseln, <code>M</code> Übersicht. Minikarte anklicken = dorthin springen.</p>
+  <p><b>Steuerung:</b> <code>W A S D</code>/Pfeile laufen, Maus schauen (Klick ins Bild sperrt die Maus, <code>Esc</code> löst), <code>Shift</code> schneller, <code>Q</code>/<code>E</code> bzw. <code>Bild↓/↑</code> Geschoss wechseln, <code>M</code> Übersicht, <code>P</code> Grundriss am Boden, <code>O</code> Möblierung. Minikarte anklicken = dorthin springen.</p>
 </div>
 <div id="hint" class="panel"></div>
 <div id="room" class="panel"><b id="rId"></b><div id="rName"></div><small id="rNgf"></small></div>
@@ -108,6 +112,7 @@
       <tr><td>Maus</td><td>umsehen – Klick ins Bild, Esc gibt die Maus frei</td></tr>
       <tr><td>Q / E</td><td>Geschoss runter / hoch (auch Bild↓ / Bild↑)</td></tr>
       <tr><td>M</td><td>Übersicht ↔ Begehung</td></tr>
+      <tr><td>P / O</td><td>Grundriss am Boden / Möblierung ein- und ausblenden</td></tr>
       <tr><td>Touch</td><td>links Joystick, rechts wischen zum Umsehen</td></tr>
     </table>
     <div class="row">
