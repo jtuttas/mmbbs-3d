@@ -2,8 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
-const VQ = '?v=4';        // Datenversion – bei neuen Daten hochzählen (Browser-Cache)
-const SH = 3.75;          // Geschosshöhe (Annahme)
+const VQ = '?v=6';        // Datenversion – bei neuen Daten hochzählen (Browser-Cache)
 const SLAB = 0.30;        // Deckenstärke
 const EYE = 1.65;
 const RADIUS = 0.22;
@@ -45,6 +44,7 @@ async function init() {
   total = META.floors.length * 3 + 1;
   floorMat.map.repeat.set(W * MPP / 2.2, H * MPP / 2.2);
   const ground = loadTex(`data/ground.webp${VQ}`).then((t) => { tick(); return t; });
+  const groundMask = loadTex(`data/ground_mask.png${VQ}`);
   await Promise.all(META.floors.map(async (f, i) => {
     const [data, texS, gridImg] = await Promise.all([
       fetch(`data/${f.id}.json${VQ}`).then((r) => r.json()).then((d) => { tick(); return d; }),
@@ -53,14 +53,21 @@ async function init() {
     ]);
     floors[i] = { ...f, data, texS, gridImg };
   }));
+  // Geschosshöhen aus den Treppenangaben der Pläne (Stufenzahl × Steigung)
+  const eg = floors.findIndex((f) => f.level === 0);
+  floors[eg].y0 = 0;
+  for (let i = eg + 1; i < floors.length; i++) floors[i].y0 = floors[i - 1].y0 + floors[i - 1].height;
+  for (let i = eg - 1; i >= 0; i--) floors[i].y0 = floors[i + 1].y0 - floors[i].height;
+  for (const f of floors) f.h = f.height;
   for (const f of floors) buildFloor(f);
-  buildGround(await ground);
+  buildGround(await ground, await groundMask);
+  buildTrees();
   buildRoof();
   buildUI();
   $('goWalk').disabled = $('goOrbit').disabled = false;
   $('goWalk').textContent = 'Begehung starten';
   const sp = META.spawn ? toWorld(META.spawn.x - 60, META.spawn.y) : [0, 0];
-  player.x = sp[0]; player.z = sp[1]; player.yaw = -Math.PI / 2; player.pitch = 0;
+  player.x = sp[0]; player.z = sp[1]; player.y = 0; player.yaw = -Math.PI / 2; player.pitch = 0; camY = EYE;
   setFloor(1, false);
   setMode('orbit');
   renderer.setAnimationLoop(loop);
@@ -109,7 +116,7 @@ const facadeMat = new THREE.MeshLambertMaterial({ color: 0xc9c4bc });
 const glassMat = new THREE.MeshLambertMaterial({ color: 0x9fc6d6, transparent: true, opacity: 0.28, depthWrite: false, side: THREE.DoubleSide });
 
 function buildFloor(f) {
-  const g = new THREE.Group(); const y0 = f.level * SH; f.y0 = y0;
+  const g = new THREE.Group(); const y0 = f.y0;
   const fpShapes = f.data.footprint.map(shapeFrom);
   // slab
   const slab = new THREE.ExtrudeGeometry(fpShapes, { depth: SLAB, bevelEnabled: false });
@@ -123,7 +130,7 @@ function buildFloor(f) {
   f.planMesh = new THREE.Mesh(top, showPlan ? f.planMat : floorMat); g.add(f.planMesh);
   // walls
   const ws = f.data.walls.map(shapeFrom);
-  const wg = new THREE.ExtrudeGeometry(ws, { depth: SH - SLAB, bevelEnabled: false, curveSegments: 1 });
+  const wg = new THREE.ExtrudeGeometry(ws, { depth: f.h - SLAB, bevelEnabled: false, curveSegments: 1 });
   wg.rotateX(-Math.PI / 2); wg.translate(0, y0, 0);
   f.wallMesh = new THREE.Mesh(wg, wallMat); g.add(f.wallMesh);
   // facade: parapet + glazing + lintel
@@ -133,8 +140,8 @@ function buildFloor(f) {
       const gg = new THREE.ExtrudeGeometry(fs, { depth: h1 - h0, bevelEnabled: false, curveSegments: 1 });
       gg.rotateX(-Math.PI / 2); gg.translate(0, y0 + h0, 0); const m = new THREE.Mesh(gg, mat); g.add(m); return gg;
     };
-    const top = SH - SLAB;
-    const pg = part(0, 0.9, facadeMat); part(0.9, 2.85, glassMat); const lg = part(2.85, top, facadeMat);
+    const top = f.h - SLAB;
+    const pg = part(0, 0.9, facadeMat); part(0.9, top - 0.6, glassMat); const lg = part(top - 0.6, top, facadeMat);
     f.facadeEdges = [pg, lg];
   }
   // dark edge lines on wall tops for readability in overview
@@ -154,9 +161,10 @@ function buildFloor(f) {
   const cx = gc.getContext('2d'); cx.drawImage(f.gridImg, 0, 0);
   const px = cx.getImageData(0, 0, gc.width, gc.height).data;
   f.grid = new Uint8Array(gc.width * gc.height);
-  for (let i = 0; i < f.grid.length; i++) f.grid[i] = px[i * 4] > 150 ? 2 : px[i * 4] > 50 ? 1 : 0;
+  for (let i = 0; i < f.grid.length; i++) { const v = px[i * 4]; f.grid[i] = v > 150 ? 2 : v > 75 ? 1 : v > 25 ? 3 : 0; }
   f.gw = gc.width; f.gh = gc.height; f.cell = f.data.grid.cell;
   f.group = g; scene.add(g);
+  buildStairs(f);
   buildFurniture(f); buildPlants(f);
 }
 
@@ -178,32 +186,87 @@ function makeLabel(r) {
 }
 function roundRect(x, a, b, w, h, r) { x.beginPath(); x.moveTo(a + r, b); x.arcTo(a + w, b, a + w, b + h, r); x.arcTo(a + w, b + h, a, b + h, r); x.arcTo(a, b + h, a, b, r); x.arcTo(a, b, a + w, b, r); x.closePath(); }
 
-function buildGround(tex) {
+function paveTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 512; const x = c.getContext('2d');
+  x.fillStyle = '#8f8d88'; x.fillRect(0, 0, 512, 512);
+  const rnd = mulberry(21);
+  // Betonsteinpflaster 30 × 60 cm im Läuferverband (512 px = 3 m)
+  const pw = 102, ph = 51;
+  for (let r = 0; r < 512 / ph + 1; r++) {
+    const off = (r % 2) * pw / 2;
+    for (let cIdx = -1; cIdx < 512 / pw + 1; cIdx++) {
+      const l = 66 + rnd() * 10, sat = 3 + rnd() * 4;
+      x.fillStyle = `hsl(${35 + rnd() * 10}, ${sat}%, ${l}%)`;
+      x.fillRect(off + cIdx * pw + 2, r * ph + 2, pw - 4, ph - 4);
+    }
+  }
+  for (let i = 0; i < 6000; i++) { x.fillStyle = `rgba(${rnd() < 0.5 ? '255,255,255' : '40,40,40'},${rnd() * 0.07})`; x.fillRect(rnd() * 512, rnd() * 512, 2, 2); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
+}
+let groundPlanMat, groundPaveMat;
+function buildGround(tex, mask) {
   tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = maxAniso;
   const sizeX = W * MPP, sizeZ = H * MPP;
-  // site plan (outdoor part of EG plan) inside the crop
+  const pave = paveTexture(); pave.repeat.set(sizeX / 3, sizeZ / 3);
+  groundPlanMat = new THREE.MeshBasicMaterial({ map: tex, alphaTest: 0.5, color: 0xdedede });
+  groundPaveMat = new THREE.MeshLambertMaterial({ map: pave, alphaMap: mask, alphaTest: 0.5 });
   const pg = new THREE.PlaneGeometry(sizeX, sizeZ); pg.rotateX(-Math.PI / 2);
-  const m = new THREE.Mesh(pg, new THREE.MeshBasicMaterial({ map: tex, alphaTest: 0.5, color: 0xdedede }));
+  const m = new THREE.Mesh(pg, showPlan ? groundPlanMat : groundPaveMat);
   m.position.y = 0.002; scene.add(m);
-  // surrounding terrain ring (keeps the basement visible from inside the crop)
-  const terr = new THREE.MeshLambertMaterial({ color: 0xb9c2a6 });
-  const B = 400;
-  const parts = [[0, -(sizeZ / 2 + B / 2), B * 2 + sizeX, B], [0, sizeZ / 2 + B / 2, B * 2 + sizeX, B],
-    [-(sizeX / 2 + B / 2), 0, B, sizeZ], [sizeX / 2 + B / 2, 0, B, sizeZ]];
-  for (const [x, z, w, h] of parts) {
-    const p = new THREE.PlaneGeometry(w, h); p.rotateX(-Math.PI / 2);
-    const mm = new THREE.Mesh(p, terr); mm.position.set(x, -0.02, z); scene.add(mm);
+  // Umgebung: Pflasterband, dahinter Rasen
+  const ring = (w0, mat, y) => {
+    const B = w0;
+    const parts = [[0, -(sizeZ / 2 + B / 2), B * 2 + sizeX, B], [0, sizeZ / 2 + B / 2, B * 2 + sizeX, B],
+      [-(sizeX / 2 + B / 2), 0, B, sizeZ], [sizeX / 2 + B / 2, 0, B, sizeZ]];
+    for (const [x, z, w, h] of parts) {
+      const p = new THREE.PlaneGeometry(w, h); p.rotateX(-Math.PI / 2);
+      const uv = p.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * w / 3, uv.getY(i) * h / 3);
+      const mm = new THREE.Mesh(p, mat); mm.position.set(x, y, z); scene.add(mm);
+    }
+  };
+  const pave2 = paveTexture(); pave2.repeat.set(1, 1);
+  ring(14, new THREE.MeshLambertMaterial({ map: pave2 }), -0.01);
+  const grass = new THREE.MeshLambertMaterial({ color: 0xa9b98f });
+  const B = 400, o = 14;
+  for (const [x, z, w, h] of [[0, -(sizeZ / 2 + o + B / 2), B * 2 + sizeX + 2 * o, B], [0, sizeZ / 2 + o + B / 2, B * 2 + sizeX + 2 * o, B],
+    [-(sizeX / 2 + o + B / 2), 0, B, sizeZ + 2 * o], [sizeX / 2 + o + B / 2, 0, B, sizeZ + 2 * o]]) {
+    const p = new THREE.PlaneGeometry(w, h); p.rotateX(-Math.PI / 2); const mm = new THREE.Mesh(p, grass); mm.position.set(x, -0.03, z); scene.add(mm);
   }
-  // Parkhaus block south of the building (context, as in the plans)
+  // Parkhaus südlich des Gebäudes
   const pk = new THREE.Mesh(new THREE.BoxGeometry(sizeX * 0.98, 12, 14), new THREE.MeshLambertMaterial({ color: 0x8c9196 }));
   pk.position.set(0, 6, sizeZ / 2 + 7.4); scene.add(pk);
   ground = m;
+}
+function buildTrees() {
+  const trees = (META.trees || []).slice();
+  // ergänzende Bäume am Platzrand
+  const sizeX = W * MPP, sizeZ = H * MPP;
+  for (let i = 0; i < 7; i++) trees.push([null, null, 2.6, -sizeX / 2 - 7, -sizeZ / 2 + 4 + i * (sizeZ - 8) / 6]);
+  for (let i = 0; i < 8; i++) trees.push([null, null, 2.6, -sizeX / 2 + 2 + i * (sizeX - 4) / 7, -sizeZ / 2 - 7]);
+  const rnd = mulberry(5);
+  const trunkG = new THREE.CylinderGeometry(0.16, 0.24, 1, 8); trunkG.translate(0, 0.5, 0);
+  const crownG = new THREE.IcosahedronGeometry(1, 1);
+  const mT = inst(trunkG, new THREE.MeshLambertMaterial({ color: 0x6b5843 }), trees.length);
+  const mC = inst(crownG, new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }), trees.length * 6);
+  trees.forEach((t, i) => {
+    let x, z; if (t[0] === null) { x = t[3]; z = t[4]; } else [x, z] = toWorld(t[0], t[1]);
+    const r = Math.max(1.8, t[2]), hT = 2.2 + r * 0.55;
+    put(mT, i, x, 0, z, 0, 1 + r * 0.12, hT, 1 + r * 0.12);
+    for (let b = 0; b < 6; b++) {
+      const a = rnd() * Math.PI * 2, d = b ? r * 0.45 : 0, s = r * (b ? 0.55 + rnd() * 0.2 : 0.75);
+      put(mC, i * 6 + b, x + Math.cos(a) * d, hT + r * 0.35 + (b ? (rnd() - 0.3) * r * 0.5 : r * 0.2), z + Math.sin(a) * d, rnd() * 6, s, s * 0.85, s);
+      mC.setColorAt(i * 6 + b, LEAF_COLORS[Math.floor(rnd() * LEAF_COLORS.length)]);
+    }
+  });
+  mC.instanceColor.needsUpdate = true;
+  scene.add(mT, mC);
 }
 let ground, roof;
 function buildRoof() {
   const top = floors[floors.length - 1];
   const geo = new THREE.ExtrudeGeometry(top.data.footprint.map(shapeFrom), { depth: SLAB, bevelEnabled: false });
-  geo.rotateX(-Math.PI / 2); geo.translate(0, (top.level + 1) * SH - SLAB, 0);
+  geo.rotateX(-Math.PI / 2); geo.translate(0, top.y0 + top.h - SLAB, 0);
   roof = new THREE.Mesh(geo, roofMat); scene.add(roof);
 }
 
@@ -317,6 +380,7 @@ function buildPlants(f) {
 function setPlan(v) {
   showPlan = v; try { localStorage.setItem('mmbbs3d.plan', v ? '1' : '0'); } catch (e) {}
   for (const f of floors) f.planMesh.material = v ? f.planMat : floorMat;
+  if (ground) ground.material = v ? groundPlanMat : groundPaveMat;
   $('tPlan').classList.toggle('on', v);
 }
 function setFurn(v) {
@@ -336,6 +400,21 @@ function applyVisibility() {
     }
   }
   roof.visible = mode === 'walk' || cutLevel >= 6;
+}
+function floorUI() {
+  const f = floors[cur];
+  document.querySelectorAll('#floors button').forEach((b) => b.classList.toggle('on', +b.dataset.i === cur));
+  $('miniF').textContent = f.name;
+}
+// Geschosswechsel durch Laufen über die Treppe
+function floorChangedByWalking(i) {
+  const prev = floors[cur]; cur = i; const f = floors[cur];
+  if (prev.texL && prev.texL !== 'loading') { prev.planMat.map = prev.texS; prev.planMat.needsUpdate = true; }
+  if (!f.texL) {
+    f.texL = 'loading';
+    loadTex(`data/${f.id}_floor.webp${VQ}`).then((t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = maxAniso; f.texL = t; if (floors[cur] === f) { f.planMat.map = t; f.planMat.needsUpdate = true; } });
+  } else if (f.texL !== 'loading') { f.planMat.map = f.texL; f.planMat.needsUpdate = true; }
+  floorUI(); applyVisibility(); drawMini(true); lastRoom = undefined;
 }
 function setFloor(i, keepPos = true) {
   i = Math.max(0, Math.min(floors.length - 1, i));
@@ -359,10 +438,90 @@ function setFloor(i, keepPos = true) {
     const p = best ? nearestFree(best[0], best[1]) : nearestFree(player.x, player.z);
     if (p) { player.x = p[0]; player.z = p[1]; }
   }
-  document.querySelectorAll('#floors button').forEach((b) => b.classList.toggle('on', +b.dataset.i === cur));
-  $('miniF').textContent = f.name;
+  player.y = f.y0; camY = f.y0 + EYE;
+  floorUI();
   if (mode === 'orbit') { cutLevel = f.level; $('cutR').value = cutLevel; updateCutLabel(); }
   applyVisibility(); drawMini(true);
+}
+
+// ---------- Treppen ----------
+const stairMat = new THREE.MeshLambertMaterial({ color: 0xd8d4cc });
+const stairEdgeMat = new THREE.LineBasicMaterial({ color: 0x8f8a82 });
+function buildStairs(f) {
+  f.steps = [];
+  const geos = [];
+  for (const st of f.data.stairs3d || []) {
+    const pts = st.p.map(([x, y]) => toWorld(x, y));
+    const cpts = (st.pc || st.p).map(([x, y]) => toWorld(x, y));
+    let minx = 1e9, maxx = -1e9, minz = 1e9, maxz = -1e9;
+    for (const [x, z] of cpts) { minx = Math.min(minx, x); maxx = Math.max(maxx, x); minz = Math.min(minz, z); maxz = Math.max(maxz, z); }
+    f.steps.push({ pts: cpts, h: st.h, bb: [minx, maxx, minz, maxz], landing: !!st.landing });
+    const shape = new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, -z)));
+    const th = st.landing ? 0.3 : 0.32;
+    const g = new THREE.ExtrudeGeometry(shape, { depth: th, bevelEnabled: false });
+    g.rotateX(-Math.PI / 2); g.translate(0, f.y0 + st.h - th, 0);
+    geos.push(g);
+  }
+  if (!geos.length) return;
+  const merged = mergeGeometries(geos);
+  f.group.add(new THREE.Mesh(merged, stairMat));
+  f.group.add(new THREE.LineSegments(new THREE.EdgesGeometry(merged, 20), stairEdgeMat));
+}
+function inPoly(pts, x, z) {
+  let c = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, zi] = pts[i], [xj, zj] = pts[j];
+    if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) c = !c;
+  }
+  return c;
+}
+function polyDist(pts, x, z) {
+  let d = 1e9;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [x1, z1] = pts[j], [x2, z2] = pts[i], dx = x2 - x1, dz = z2 - z1, L = dx * dx + dz * dz || 1;
+    const t = Math.max(0, Math.min(1, ((x - x1) * dx + (z - z1) * dz) / L));
+    d = Math.min(d, Math.hypot(x - x1 - t * dx, z - z1 - t * dz));
+  }
+  return d;
+}
+function floorAt(y) {
+  let i = 0;
+  for (let k = 0; k < floors.length; k++) if (floors[k].y0 <= y + 0.3) i = k;
+  return i;
+}
+// Oberfläche unter (x,z) nahe der aktuellen Höhe py – Boden, Stufe oder Podest
+function surfaceAt(x, z, py) {
+  const fi = floorAt(py); let best = null, bd = 0.46;
+  for (let k = Math.max(0, fi - 1); k <= Math.min(floors.length - 1, fi + 1); k++) {
+    const f = floors[k];
+    let onStep = false;
+    for (const s of f.steps) {
+      if (x < s.bb[0] - 0.3 || x > s.bb[1] + 0.3 || z < s.bb[2] - 0.3 || z > s.bb[3] + 0.3) continue;
+      const inside = inPoly(s.pts, x, z);
+      if (inside) onStep = true;
+      const y = f.y0 + s.h; if (Math.abs(y - py) >= bd) continue;
+      // kleine Lücken zwischen Wendelstufen/Podesten überbrücken
+      if (inside || polyDist(s.pts, x, z) < 0.28) { bd = Math.abs(y - py); best = y; }
+    }
+    const v = cellVal(f, x, z);
+    if (!onStep && (v === 1 || (v === 0 && f.level === 0)) && Math.abs(f.y0 - py) < bd) { bd = Math.abs(f.y0 - py); best = f.y0; }
+  }
+  return best;
+}
+function wallHit(fi, x, z) {
+  const f = floors[fi];
+  for (let a = 0; a < 8; a++) {
+    const ang = a * Math.PI / 4, v = cellVal(f, x + Math.cos(ang) * RADIUS, z + Math.sin(ang) * RADIUS);
+    if (v === 2 || v === -1) return true;
+  }
+  return false;
+}
+// Bewegung prüfen: liefert neue Fußhöhe oder null
+function tryMove(x, z, py) {
+  const y = surfaceAt(x, z, py);
+  if (y === null) return null;
+  if (wallHit(floorAt(y), x, z)) return null;
+  return y;
 }
 
 // ---------- collision ----------
@@ -374,6 +533,7 @@ function cellVal(f, x, z) {
 }
 function blocked(x, z) {
   const f = floors[cur];
+  const c = cellVal(f, x, z); if (c === 3) return true;
   for (let a = 0; a < 9; a++) {
     const r = a === 8 ? 0 : RADIUS, ang = a * Math.PI / 4;
     const v = cellVal(f, x + Math.cos(ang) * r, z + Math.sin(ang) * r);
@@ -394,7 +554,8 @@ function nearestFree(x, z) {
 }
 
 // ---------- player / input ----------
-const player = { x: 0, z: 0, yaw: 0, pitch: 0 };
+const player = { x: 0, z: 0, y: 0, yaw: 0, pitch: 0 };
+let camY = 1.65;
 const keys = {};
 let locked = false, dragging = false, lastX = 0, lastY = 0;
 const joy = { active: false, id: null, x: 0, y: 0, cx: 0, cy: 0 }, look = { id: null, x: 0, y: 0 };
@@ -463,14 +624,16 @@ function setMode(m) {
     if (document.pointerLockElement) document.exitPointerLock();
     const f = floors[cur];
     if (f.texL && f.texL !== 'loading') { f.planMat.map = f.texS; f.planMat.needsUpdate = true; }
-    orbit.target.set(player.x * 0.3, Math.max(0, cutLevel) * SH * 0.5, player.z * 0.3);
+    orbit.target.set(player.x * 0.3, Math.max(0, floors[Math.max(0, Math.min(floors.length - 1, cutLevel + 1))].y0) * 0.5, player.z * 0.3);
     camera.position.set(-62, 58, -58);
     scene.fog.near = 200; scene.fog.far = 600;
   } else {
     scene.fog.near = 120; scene.fog.far = 320;
     const f = floors[cur];
     if (f.texL && f.texL !== 'loading') { f.planMat.map = f.texL; f.planMat.needsUpdate = true; }
-    if (blocked(player.x, player.z)) { const p = nearestFree(player.x, player.z); if (p) { player.x = p[0]; player.z = p[1]; } }
+    if (Math.abs(player.y - floors[cur].y0) > 0.01 && floorAt(player.y) !== cur) player.y = floors[cur].y0;
+    if (surfaceAt(player.x, player.z, player.y) === null) { player.y = floors[cur].y0; const p = nearestFree(player.x, player.z); if (p) { player.x = p[0]; player.z = p[1]; } }
+    camY = player.y + EYE;
   }
   applyVisibility(); drawMini(true);
 }
@@ -505,6 +668,7 @@ function buildUI() {
     const [x, z] = toWorld(px, py);
     player.x = x; player.z = z;
     if (blocked(x, z)) { const p = nearestFree(x, z); if (p) { player.x = p[0]; player.z = p[1]; } }
+    player.y = floors[cur].y0; camY = player.y + EYE;
     if (mode !== 'walk') { $('start').style.display = 'none'; setMode('walk'); }
   });
 }
@@ -552,7 +716,7 @@ function updateRoom() {
   let nearStair = false;
   for (const s of f.data.stairs) if (Math.hypot(s.x - px, s.y - py) * MPP < 6) nearStair = true;
   const h = $('hint');
-  if (nearStair) { h.style.display = 'block'; h.textContent = 'Treppenhaus · Q / E (Bild↓ / Bild↑) wechselt das Geschoss'; }
+  if (nearStair) { h.style.display = 'block'; h.textContent = 'Treppenhaus · einfach die Treppe hinauf- oder hinunterlaufen (Q / E springt direkt)'; }
   else h.style.display = 'none';
 }
 function lineFree(f, x0, y0, x1, y1) {
@@ -581,10 +745,15 @@ function loop() {
       const k = sp / Math.max(1, l);
       const sx = -Math.sin(player.yaw), sz = -Math.cos(player.yaw);
       const dx = (sx * fw + Math.cos(player.yaw) * st) * k, dz = (sz * fw - Math.sin(player.yaw) * st) * k;
-      if (!blocked(player.x + dx, player.z)) player.x += dx;
-      if (!blocked(player.x, player.z + dz)) player.z += dz;
+      let y = tryMove(player.x + dx, player.z, player.y);
+      if (y !== null) { player.x += dx; player.y = y; }
+      y = tryMove(player.x, player.z + dz, player.y);
+      if (y !== null) { player.z += dz; player.y = y; }
+      const fi = floorAt(player.y);
+      if (fi !== cur) floorChangedByWalking(fi);
     }
-    camera.position.set(player.x, floors[cur].y0 + EYE, player.z);
+    camY += (player.y + EYE - camY) * Math.min(1, dt * 12);
+    camera.position.set(player.x, camY, player.z);
     camera.rotation.set(player.pitch, player.yaw, 0, 'YXZ');
     if (frame % 6 === 0) { updateRoom(); }
     drawMini();
@@ -598,5 +767,4 @@ function loop() {
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
 });
-window.__pos = () => ({ x: player.x, z: player.z, floor: floors[cur] && floors[cur].id, room: lastRoom && lastRoom.id });
 init().catch((e) => { $('goWalk').textContent = 'Fehler beim Laden'; console.error(e); });

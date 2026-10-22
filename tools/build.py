@@ -23,6 +23,7 @@ def inside_excl(rect, ex):
 
 def P(pt): return ((pt.x - X0) * R, (pt.y - Y0) * R)
 
+prev_hole = None
 meta = {'metersPerPx': M / R, 'width': W, 'height': H, 'floors': []}
 for fid, lvl, code, name in FLOORS:
     path = glob.glob(f'{D}/*{code}_Grundriss*.pdf')[0]
@@ -178,6 +179,92 @@ for fid, lvl, code, name in FLOORS:
     n, lab, st, _ = cv2.connectedComponentsWithStats(walls, 8)
     for i in range(1, n):
         if st[i, cv2.CC_STAT_AREA] < 60: walls[lab == i] = 0
+    # ---- Treppen aus den Stufennummern der Pläne ----
+    nums, stg = [], []
+    for b in page.get_text('dict')['blocks']:
+        for L in b.get('lines', []):
+            for sp in L['spans']:
+                t = sp['text'].strip(); bb = sp['bbox']
+                if not (X0 < bb[0] < X1 and Y0 < bb[1] < Y1) or inside_excl(pymupdf.Rect(bb), ex): continue
+                mm = re.match(r'(\d+)\s*STG\s*x\s*([\d,]+)', t)
+                if mm: stg.append((int(mm.group(1)), float(mm.group(2).replace(',', '.')) / 100))
+                if re.fullmatch(r'\d{1,2}', t) and sp['size'] < 6.5:
+                    nums.append((int(t), (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2))
+    chains = []
+    used = set()
+    for i, (k, x, y) in enumerate(nums):
+        if k != 1: continue
+        ch = [(x, y)]; cx, cy = x, y; kk = 1
+        while True:
+            cand = [(np.hypot(x2 - cx, y2 - cy), j) for j, (k2, x2, y2) in enumerate(nums) if k2 == kk + 1 and j not in used]
+            cand = [c for c in cand if c[0] < 80]
+            if not cand: break
+            dmin, j = min(cand); used.add(j); cx, cy = nums[j][1], nums[j][2]; ch.append((cx, cy)); kk += 1
+        if len(ch) >= 20: chains.append(ch)
+    Hs = [N * r for N, r in stg if any(len(c) == N for c in chains)]
+    Hf = min(Hs) if Hs else 4.35
+    stairs3d = []; smask = np.zeros((H, W), np.uint8); hole = np.zeros((H, W), np.uint8)
+    def ray(px, py, dx, dy, maxpx):
+        for t in range(6, int(maxpx), 2):
+            xx, yy = int(px + dx * t), int(py + dy * t)
+            if not (0 <= xx < W and 0 <= yy < H) or walls[yy, xx]: return t
+        return maxpx
+    for ch in chains:
+        N = len(ch); rr = Hf / N
+        pts = np.array([P(pymupdf.Point(x, y)) for x, y in ch], np.float64)
+        gaps = np.hypot(*(pts[1:] - pts[:-1]).T)
+        med = np.median(gaps)
+        treads = []
+        for k in range(N):
+            a = pts[max(k - 1, 0)]; b = pts[min(k + 1, N - 1)]
+            # Laufrichtung lokal; an Knicken nur den Nachbarn im selben Lauf verwenden
+            if k > 0 and gaps[k - 1] > 1.6 * med: a = pts[k]
+            if k < N - 1 and gaps[k] > 1.6 * med: b = pts[k]
+            dv = b - a; ln = np.hypot(*dv)
+            if ln < 1e-6: dv = pts[k] - pts[k - 1] if k else pts[1] - pts[0]; ln = np.hypot(*dv)
+            dv = dv / ln; nv = np.array([-dv[1], dv[0]])
+            maxw = 1.8 / (M / R)
+            wp = ray(pts[k][0], pts[k][1], nv[0], nv[1], maxw); wm2 = ray(pts[k][0], pts[k][1], -nv[0], -nv[1], maxw)
+            treads.append([pts[k], dv, nv, wp, wm2])
+        # Treppenläufe: einheitliche Seite und Breite (Mehrheitsentscheid je Lauf)
+        flight = [0]
+        for k in range(1, N): flight.append(flight[-1] + (1 if gaps[k - 1] > 1.6 * med else 0))
+        for fl in set(flight):
+            idx = [k for k in range(N) if flight[k] == fl]
+            dm = np.mean([treads[k][1] for k in idx], axis=0); dm /= (np.hypot(*dm) or 1)
+            nref = np.array([-dm[1], dm[0]])
+            plus, minus = [], []
+            for k in idx:
+                c, dv, nv, wp, wm2 = treads[k]
+                if np.dot(nv, nref) < 0: wp, wm2 = wm2, wp
+                plus.append(wp); minus.append(wm2)
+            side = 1 if np.median(plus) >= np.median(minus) else -1
+            far = plus if side == 1 else minus; near = minus if side == 1 else plus
+            ws = min(np.percentile(far, 75), maxw); bs = min(np.median(near), 0.2 / (M / R))
+            for k in idx:
+                nv = treads[k][2]
+                if np.dot(nv, nref) * side < 0: nv = -nv
+                treads[k] = [treads[k][0], treads[k][1], nv, ws, bs]
+        for k in range(N):
+            c, dv, nv, w, back = treads[k]; depth = med
+            poly = [c - dv * depth / 2 - nv * back, c + dv * depth / 2 - nv * back, c + dv * depth / 2 + nv * w, c - dv * depth / 2 + nv * w]
+            dc = depth * 0.7   # Kollisionsfläche überlappend, damit keine Lücken zwischen Stufen entstehen
+            pc = [c - dv * dc - nv * back, c + dv * dc - nv * back, c + dv * dc + nv * w, c - dv * dc + nv * w]
+            treads[k] = (poly, dv, nv, w, back)
+            stairs3d.append({'p': [[round(float(v), 1) for v in q] for q in poly], 'pc': [[round(float(v), 1) for v in q] for q in pc], 'h': round((k + 1) * rr, 3), 'k': k + 1, 'n': N})
+        # Podeste bei großen Lücken
+        for k in range(N - 1):
+            if gaps[k] > 1.6 * med:
+                p1, d1, n1, w1_, _ = treads[k]; p2, d2, n2, w2_, _ = treads[k + 1]
+                hullpts = np.array(p1 + p2 + ([q + d1 * w1_ for q in p1] + [q - d2 * w2_ for q in p2] if gaps[k] > 3 * med else []), np.float32)
+                hull = cv2.convexHull(hullpts).reshape(-1, 2)
+                stairs3d.append({'p': [[round(float(v), 1) for v in q] for q in hull], 'h': round((k + 1) * rr, 3), 'k': k + 1, 'n': N, 'landing': True})
+    for st_ in stairs3d:
+        arr = np.array(st_['p'], np.int32)
+        cv2.fillPoly(smask, [arr], 255)
+        if st_['k'] < st_['n'] and st_['h'] >= Hf - 2.4: cv2.fillPoly(hole, [np.array(st_.get('pc', st_['p']), np.int32)], 255)
+    walls[cv2.dilate(smask, np.ones((3, 3), np.uint8)) > 0] = 0
+    hole = cv2.dilate(hole, np.ones((5, 5), np.uint8))
     # footprint from room fills + walls
     roomf = cv2.morphologyEx(roomf, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (45, 45)))
     fp = cv2.bitwise_or(roomf, walls)
@@ -194,6 +281,8 @@ for fid, lvl, code, name in FLOORS:
 
     walls = cv2.bitwise_and(walls, cv2.dilate(fp, np.ones((9, 9), np.uint8)))
     band = cv2.subtract(fp, cv2.erode(fp, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (45, 45))))
+    if prev_hole is not None:
+        fp[prev_hole > 0] = 0          # Treppenauge: Deckenöffnung über der Treppe des Geschosses darunter
     facade = cv2.bitwise_and(walls, band) if lvl >= 0 else np.zeros_like(walls)
     inner = cv2.subtract(walls, facade)
     def polys_of(mm):
@@ -256,7 +345,11 @@ for fid, lvl, code, name in FLOORS:
     grid = np.zeros((gh, gw), np.uint8)
     grid[fsmall > 127] = 1          # walkable interior
     grid[wsmall > 60] = 2           # wall
-    Image.fromarray(grid * 100).save(f'{OUT}/{fid}_grid.png', optimize=True)
+    if prev_hole is not None:
+        hsmall = cv2.resize(prev_hole, (gw, gh), interpolation=cv2.INTER_AREA)
+        ssmall = cv2.resize(smask, (gw, gh), interpolation=cv2.INTER_AREA)
+        grid[(hsmall > 127) & (ssmall < 60)] = 3
+    Image.fromarray(np.array([0, 100, 200, 50], np.uint8)[grid]).save(f'{OUT}/{fid}_grid.png', optimize=True)
 
     # floor texture (full plan render) with footprint alpha
     pix = page.get_pixmap(matrix=pymupdf.Matrix(TR, TR), clip=pymupdf.Rect(X0, Y0, X1, Y1), alpha=False)
@@ -267,6 +360,44 @@ for fid, lvl, code, name in FLOORS:
     rgba.save(f'{OUT}/{fid}_floor.webp', quality=82, method=6)
     rgba.resize((pix.width // 2, pix.height // 2), Image.LANCZOS).save(f'{OUT}/{fid}_floor_s.webp', quality=78, method=6)
     if fid == 'EG':
+        gm = cv2.resize(255 - fp, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
+        Image.fromarray(gm).save(f'{OUT}/ground_mask.png', optimize=True)
+        # Bäume aus den Baumkronen-Flächen des Lageplans
+        tm = np.zeros((H, W), np.uint8)
+        for d in drs:
+            if d['type'] not in ('f', 'fs') or not d.get('fill'): continue
+            fc = key(d['fill']); op = d.get('fill_opacity') or 1
+            if not (0.4 < op < 0.6 and len(d['items']) >= 100 and 100 < d['rect'].width < 600): continue
+            r0 = d['rect']
+            subs, cur, last = [], [], None
+            for it in d['items']:
+                if it[0] in ('l', 'c'):
+                    a_, b_ = it[1], it[-1]
+                    if last is not None and abs(a_.x - last.x) + abs(a_.y - last.y) > 0.5: subs.append(cur); cur = []
+                    if not cur: cur.append(P(a_))
+                    cur.append(P(b_)); last = b_
+            subs.append(cur)
+            for sp_ in subs:
+                if len(sp_) > 2: cv2.fillPoly(tm, [np.array(sp_, np.int32)], 255)
+        tm = cv2.morphologyEx(tm, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41)))
+        tm[cv2.dilate(fp, np.ones((41, 41), np.uint8)) > 0] = 0
+        n_, lab_, st_, cen_ = cv2.connectedComponentsWithStats(tm, 8)
+        trees = []
+        for i in range(1, n_):
+            area = st_[i, cv2.CC_STAT_AREA] * (M / R) ** 2
+            if area < 4: continue
+            ys, xs = np.where(lab_ == i)
+            ptsT = np.c_[xs, ys].astype(np.float32)
+            (cx_, cy_), (w_, h_), ang_ = cv2.minAreaRect(ptsT)
+            mj, mn_ = max(w_, h_), min(w_, h_)
+            rad_px = min(mn_ / 2, 4.5 / (M / R))
+            cnt = max(1, int(round(mj / (2 * rad_px))))
+            ax = np.array([np.cos(np.radians(ang_)), np.sin(np.radians(ang_))]) if w_ >= h_ else np.array([-np.sin(np.radians(ang_)), np.cos(np.radians(ang_))])
+            rad = rad_px * M / R
+            for t in range(cnt):
+                off = (t - (cnt - 1) / 2) * mj / cnt
+                trees.append([round(float(cx_ + ax[0] * off), 1), round(float(cy_ + ax[1] * off), 1), round(float(min(rad, 6)), 2)])
+        meta['trees'] = trees
         g = img.convert('RGBA'); g.putalpha(Image.fromarray(255 - cv2.resize(fp, (pix.width, pix.height), interpolation=cv2.INTER_NEAREST)))
         g.resize((pix.width // 2, pix.height // 2), Image.LANCZOS).save(f'{OUT}/ground.webp', quality=75, method=6)
         for b in page.get_text('dict')['blocks']:
@@ -327,8 +458,9 @@ for fid, lvl, code, name in FLOORS:
         elif 0.35 <= mn <= 0.9 and mx > 2.5: t = 'cab'
         else: continue
         furn.append([t, round(cx, 1), round(cy, 1), round(wm_, 2), round(hm_, 2), round(float(ang), 1)])
-    json.dump({'walls': polys, 'furn': furn, 'facade': facade_polys, 'footprint': fpolys, 'rooms': rooms, 'stairs': stairs,
+    prev_hole = hole
+    json.dump({'walls': polys, 'furn': furn, 'stairs3d': stairs3d, 'facade': facade_polys, 'footprint': fpolys, 'rooms': rooms, 'stairs': stairs,
                'grid': {'w': gw, 'h': gh, 'cell': cell}}, open(f'{OUT}/{fid}.json', 'w'), separators=(',', ':'))
-    meta['floors'].append({'id': fid, 'level': lvl, 'name': name, 'source': os.path.basename(path)})
-    print(fid, 'furn', len(furn), 'doors', ndoor, 'walls', len(polys), 'rooms', len(rooms), 'stairs', len(stairs), 'tex', pix.width, pix.height)
+    meta['floors'].append({'id': fid, 'level': lvl, 'name': name, 'height': round(Hf, 3), 'source': os.path.basename(path)})
+    print(fid, 'H', round(Hf,3), 'stairs', len(chains), [len(c) for c in chains], 'furn', len(furn), 'doors', ndoor, 'walls', len(polys), 'rooms', len(rooms), 'stairs', len(stairs), 'tex', pix.width, pix.height)
 json.dump(meta, open(f'{OUT}/meta.json', 'w'), indent=1)

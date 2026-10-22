@@ -7,44 +7,68 @@
    "id": "KG",
    "level": -1,
    "name": "1. Untergeschoss",
+   "height": 4.968,
    "source": "2223MMBbS_2_GRR_KG1_Grundriss_20230330_RPI_0bA.pdf"
   },
   {
    "id": "EG",
    "level": 0,
    "name": "Erdgeschoss",
+   "height": 4.35,
    "source": "2223MMbBS_2_GRR_EG0_Grundriss_20230330_RPI_0bA.pdf"
   },
   {
    "id": "OG1",
    "level": 1,
    "name": "1. Obergeschoss",
+   "height": 4.35,
    "source": "2223MMBbS_2_GRR_OG1_Grundriss_20230330_RPI_0bA.pdf"
   },
   {
    "id": "OG2",
    "level": 2,
    "name": "2. Obergeschoss",
+   "height": 4.35,
    "source": "2223MMBbS_2_GRR_OG2_Grundriss_20230330_RPI_0bA.pdf"
   },
   {
    "id": "OG3",
    "level": 3,
    "name": "3. Obergeschoss",
+   "height": 4.35,
    "source": "2223MMBbS_2_GRR_OG3_Grundriss_20230330_RPI_0bA.pdf"
   },
   {
    "id": "OG4",
    "level": 4,
    "name": "4. Obergeschoss",
+   "height": 4.35,
    "source": "2223MMBbS_2_GRR_OG4_Grundriss_20230330_RPI_0bA.pdf"
   },
   {
    "id": "OG5",
    "level": 5,
    "name": "5. Obergeschoss",
+   "height": 4.35,
    "source": "2223MMBbS_2_GRR_OG5_Grundriss_20230330_RPI_0bA.pdf"
   }
+ ],
+ "trees": [
+  [
+   181.8,
+   1189.2,
+   4.5
+  ],
+  [
+   696.3,
+   1294.1,
+   4.5
+  ],
+  [
+   1210.7,
+   1399.0,
+   4.5
+  ]
  ],
  "spawn": {
   "x": 1770.623779296875,
