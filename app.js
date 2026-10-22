@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
+const VQ = '?v=4';        // Datenversion – bei neuen Daten hochzählen (Browser-Cache)
 const SH = 3.75;          // Geschosshöhe (Annahme)
 const SLAB = 0.30;        // Deckenstärke
 const EYE = 1.65;
@@ -39,16 +40,16 @@ let done = 0, total = 1;
 const tick = () => { done++; $('prog').firstElementChild.style.width = (100 * done / total) + '%'; };
 
 async function init() {
-  META = await (await fetch('data/meta.json')).json();
+  META = await (await fetch(`data/meta.json${VQ}`, { cache: 'no-cache' })).json();
   MPP = META.metersPerPx; W = META.width; H = META.height; CX = W * MPP / 2; CZ = H * MPP / 2;
   total = META.floors.length * 3 + 1;
   floorMat.map.repeat.set(W * MPP / 2.2, H * MPP / 2.2);
-  const ground = loadTex('data/ground.webp').then((t) => { tick(); return t; });
+  const ground = loadTex(`data/ground.webp${VQ}`).then((t) => { tick(); return t; });
   await Promise.all(META.floors.map(async (f, i) => {
     const [data, texS, gridImg] = await Promise.all([
-      fetch(`data/${f.id}.json`).then((r) => r.json()).then((d) => { tick(); return d; }),
-      loadTex(`data/${f.id}_floor_s.webp`).then((t) => { tick(); return t; }),
-      loadImg(`data/${f.id}_grid.png`).then((t) => { tick(); return t; }),
+      fetch(`data/${f.id}.json${VQ}`).then((r) => r.json()).then((d) => { tick(); return d; }),
+      loadTex(`data/${f.id}_floor_s.webp${VQ}`).then((t) => { tick(); return t; }),
+      loadImg(`data/${f.id}_grid.png${VQ}`).then((t) => { tick(); return t; }),
     ]);
     floors[i] = { ...f, data, texS, gridImg };
   }));
@@ -343,7 +344,7 @@ function setFloor(i, keepPos = true) {
   if (prev && prev !== f && prev.texL) prev.planMat.map = prev.texS, prev.planMat.needsUpdate = true;
   if (!f.texL) {
     f.texL = 'loading';
-    loadTex(`data/${f.id}_floor.webp`).then((t) => {
+    loadTex(`data/${f.id}_floor.webp${VQ}`).then((t) => {
       t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = maxAniso; f.texL = t;
       if (floors[cur] === f && mode === 'walk') { f.planMat.map = t; f.planMat.needsUpdate = true; }
     });
@@ -597,4 +598,5 @@ function loop() {
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
 });
+window.__pos = () => ({ x: player.x, z: player.z, floor: floors[cur] && floors[cur].id, room: lastRoom && lastRoom.id });
 init().catch((e) => { $('goWalk').textContent = 'Fehler beim Laden'; console.error(e); });
