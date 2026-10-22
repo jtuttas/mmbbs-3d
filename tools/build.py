@@ -130,6 +130,50 @@ for fid, lvl, code, name in FLOORS:
         if er.sum() > 0.15 * st[i, cv2.CC_STAT_AREA]:
             wm[lab == i] = 0            # solid blob (stair flights, landings) -> not a wall
     walls = cv2.bitwise_or(walls, wm)
+    # Türen öffnen: Schwenkbereich jeder Türaufschlag-Bogenlinie freiräumen
+    doors = np.zeros((H, W), np.uint8); ndoor = 0
+    for d in drs:
+        if d['type'] != 's' or not d.get('color') or max(d['color']) > 0.3: continue
+        r0 = d['rect']
+        if r0.x1 < X0 or r0.x0 > X1 or r0.y1 < Y0 or r0.y0 > Y1 or inside_excl(r0, ex): continue
+        for it in d['items']:
+            if it[0] != 'c': continue
+            p1, c1, c2, p2 = it[1], it[2], it[3], it[4]
+            t1 = np.array([c1.x - p1.x, c1.y - p1.y]); t2 = np.array([p2.x - c2.x, p2.y - c2.y])
+            if np.linalg.norm(t1) < 1e-3 or np.linalg.norm(t2) < 1e-3: continue
+            n1 = np.array([-t1[1], t1[0]]); n2 = np.array([-t2[1], t2[0]])
+            A = np.array([n1, -n2]).T; b = np.array([p2.x - p1.x, p2.y - p1.y])
+            if abs(np.linalg.det(A)) < 1e-6: continue
+            k = np.linalg.solve(A, b)
+            cx_, cy_ = p1.x + k[0] * n1[0], p1.y + k[0] * n1[1]
+            r1 = np.hypot(p1.x - cx_, p1.y - cy_); r2 = np.hypot(p2.x - cx_, p2.y - cy_)
+            if not (15 <= r1 <= 42) or abs(r1 - r2) > 0.08 * r1: continue
+            ang = np.degrees(np.arccos(np.clip(np.dot([p1.x - cx_, p1.y - cy_], [p2.x - cx_, p2.y - cy_]) / (r1 * r2), -1, 1)))
+            if ang < 30 or ang > 100: continue
+            # Sektor als Polygon (Mittelpunkt + Bogenpunkte)
+            a1 = np.arctan2(p1.y - cy_, p1.x - cx_); a2 = np.arctan2(p2.y - cy_, p2.x - cx_)
+            da = (a2 - a1 + np.pi) % (2 * np.pi) - np.pi
+            pts = [P(pymupdf.Point(cx_, cy_))] + [P(pymupdf.Point(cx_ + r1 * np.cos(a1 + da * t), cy_ + r1 * np.sin(a1 + da * t))) for t in np.linspace(0, 1, 8)]
+            cv2.fillPoly(doors, [np.array(pts, np.int32)], 255); ndoor += 1
+        # gestrichelte / polygonale Bögen: Kreis an Linienpunkte anpassen
+        ls = [it for it in d['items'] if it[0] == 'l']
+        if len(ls) >= 4 and len(ls) == len(d['items']) and max(r0.width, r0.height) <= 45 and max(r0.width, r0.height) >= 12:
+            pts_ = np.array([[it[1].x, it[1].y] for it in ls] + [[ls[-1][2].x, ls[-1][2].y]])
+            A = np.c_[2 * pts_, np.ones(len(pts_))]; bb = (pts_ ** 2).sum(1)
+            try:
+                sol = np.linalg.lstsq(A, bb, rcond=None)[0]
+            except Exception:
+                continue
+            cx_, cy_ = sol[0], sol[1]; rr = np.sqrt(max(sol[2] + cx_ ** 2 + cy_ ** 2, 0))
+            if not (15 <= rr <= 42): continue
+            if np.abs(np.hypot(pts_[:, 0] - cx_, pts_[:, 1] - cy_) - rr).max() > 0.08 * rr: continue
+            angs = np.unwrap(np.arctan2(pts_[:, 1] - cy_, pts_[:, 0] - cx_))
+            span = np.degrees(angs.max() - angs.min())
+            if span < 30 or span > 100: continue
+            pts = [P(pymupdf.Point(cx_, cy_))] + [P(pymupdf.Point(cx_ + rr * np.cos(a), cy_ + rr * np.sin(a))) for a in np.linspace(angs.min(), angs.max(), 8)]
+            cv2.fillPoly(doors, [np.array(pts, np.int32)], 255); ndoor += 1
+    doors = cv2.dilate(doors, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19)))
+    walls[doors > 0] = 0
     # remove specks
     n, lab, st, _ = cv2.connectedComponentsWithStats(walls, 8)
     for i in range(1, n):
@@ -258,5 +302,5 @@ for fid, lvl, code, name in FLOORS:
     json.dump({'walls': polys, 'facade': facade_polys, 'footprint': fpolys, 'rooms': rooms, 'stairs': stairs,
                'grid': {'w': gw, 'h': gh, 'cell': cell}}, open(f'{OUT}/{fid}.json', 'w'), separators=(',', ':'))
     meta['floors'].append({'id': fid, 'level': lvl, 'name': name, 'source': os.path.basename(path)})
-    print(fid, 'walls', len(polys), 'rooms', len(rooms), 'stairs', len(stairs), 'tex', pix.width, pix.height)
+    print(fid, 'doors', ndoor, 'walls', len(polys), 'rooms', len(rooms), 'stairs', len(stairs), 'tex', pix.width, pix.height)
 json.dump(meta, open(f'{OUT}/meta.json', 'w'), indent=1)
